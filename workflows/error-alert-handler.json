@@ -1,0 +1,70 @@
+{
+  "name": "Global Error Handler",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Global error handler\nSet this workflow as the Error Workflow\nin every production workflow's settings\n(Settings -> Error Workflow).\n\nAny failure anywhere -> instant Telegram\nalert with workflow name, failed node and\nerror message. Silent failures are how\nautomations rot; this makes every failure\nloud.",
+        "height": 260,
+        "width": 340
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-480, -260],
+      "id": "note-err",
+      "name": "Note: Error Handler"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [-400, -20],
+      "id": "node-error-trigger",
+      "name": "On Any Workflow Error"
+    },
+    {
+      "parameters": {
+        "jsCode": "const e = $json;\nconst wf = e.workflow?.name || 'unknown workflow';\nconst node = e.execution?.lastNodeExecuted || 'unknown node';\nconst msg = e.execution?.error?.message || 'no message';\nconst url = e.execution?.url || '';\nreturn [{ json: {\n  text: `❌ WORKFLOW FAILED\\nWorkflow: ${wf}\\nNode: ${node}\\nError: ${String(msg).slice(0, 500)}${url ? '\\nExecution: ' + url : ''}`\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-176, -20],
+      "id": "node-format",
+      "name": "Format Alert"
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_CHAT_ID",
+        "text": "={{ $json.text }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [48, -20],
+      "id": "node-tg",
+      "name": "Telegram Alert",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_AFTER_IMPORT",
+          "name": "Telegram Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "On Any Workflow Error": {
+      "main": [[{ "node": "Format Alert", "type": "main", "index": 0 }]]
+    },
+    "Format Alert": {
+      "main": [[{ "node": "Telegram Alert", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

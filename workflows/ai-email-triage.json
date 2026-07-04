@@ -1,0 +1,321 @@
+{
+  "name": "AI Email Triage & Assisted Reply",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 1. Ingest\nIMAP trigger fires on every new email.\nConfig node keeps all tunables in ONE place\n(categories, Telegram chat, sheet id) —\nno digging through nodes to reconfigure.",
+        "height": 220,
+        "width": 300
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-560, -280],
+      "id": "note-ingest",
+      "name": "Note: Ingest"
+    },
+    {
+      "parameters": {
+        "postProcessAction": "read",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2,
+      "position": [-480, -60],
+      "id": "trigger-imap",
+      "name": "New Email (IMAP)",
+      "credentials": {
+        "imap": {
+          "id": "REPLACE_AFTER_IMPORT",
+          "name": "Inbox (IMAP)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-1",
+              "name": "categories",
+              "value": "urgent, invoice, newsletter, general",
+              "type": "string"
+            },
+            {
+              "id": "cfg-2",
+              "name": "telegram_chat_id",
+              "value": "YOUR_CHAT_ID",
+              "type": "string"
+            },
+            {
+              "id": "cfg-3",
+              "name": "invoice_sheet_id",
+              "value": "YOUR_GOOGLE_SHEET_ID",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-272, -60],
+      "id": "node-config",
+      "name": "Config"
+    },
+    {
+      "parameters": {
+        "content": "## 2. Classify with Claude\nStrict JSON contract in the prompt.\nretryOnFail handles transient API errors;\nthe parser below falls back to 'general'\nif the model ever returns malformed JSON —\nthe pipeline never dies on one bad reply.",
+        "height": 240,
+        "width": 320
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-80, -320],
+      "id": "note-classify",
+      "name": "Note: Classify"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: 'claude-sonnet-5',\n  max_tokens: 400,\n  system: 'You classify emails. Respond ONLY with valid JSON: {\"category\":\"urgent|invoice|newsletter|general\",\"summary\":\"one sentence\",\"suggested_reply\":\"2-4 sentence draft reply, or empty string if none needed\"}',\n  messages: [{ role: 'user', content: 'From: ' + ($json.from || '') + '\\nSubject: ' + ($json.subject || '') + '\\n\\n' + String($json.textPlain || $json.textHtml || '').slice(0, 4000) }]\n}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [-48, -60],
+      "id": "node-claude",
+      "name": "Classify (Claude)",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_AFTER_IMPORT",
+          "name": "Anthropic API (x-api-key)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the model's JSON with a hard fallback: a malformed reply\n// must never kill the pipeline — it degrades to 'general'.\nconst email = $('New Email (IMAP)').item.json;\nlet parsed = { category: 'general', summary: '', suggested_reply: '' };\ntry {\n  const raw = $json.content?.[0]?.text ?? '';\n  const clean = raw.replace(/```json|```/g, '').trim();\n  const candidate = JSON.parse(clean);\n  const allowed = ['urgent', 'invoice', 'newsletter', 'general'];\n  parsed = {\n    category: allowed.includes(candidate.category) ? candidate.category : 'general',\n    summary: String(candidate.summary || '').slice(0, 300),\n    suggested_reply: String(candidate.suggested_reply || '').slice(0, 1500),\n  };\n} catch (e) {\n  parsed.summary = 'Classifier output could not be parsed; routed as general.';\n}\nreturn [{ json: {\n  ...parsed,\n  from: email.from,\n  subject: email.subject,\n  received_at: new Date().toISOString(),\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [176, -60],
+      "id": "node-parse",
+      "name": "Parse & Validate"
+    },
+    {
+      "parameters": {
+        "content": "## 3. Route\nurgent  -> instant Telegram alert\ninvoice -> append to Google Sheets log\nnewsletter -> stop silently\ngeneral -> AI reply draft sent to Telegram\nfor HUMAN APPROVAL — the bot never sends\nemail on its own.",
+        "height": 240,
+        "width": 300
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [400, -320],
+      "id": "note-route",
+      "name": "Note: Route"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "typeValidation": "strict", "version": 3 },
+                "conditions": [
+                  {
+                    "id": "r-urgent",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "urgent",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "urgent"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "typeValidation": "strict", "version": 3 },
+                "conditions": [
+                  {
+                    "id": "r-invoice",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "invoice",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "invoice"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "typeValidation": "strict", "version": 3 },
+                "conditions": [
+                  {
+                    "id": "r-newsletter",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "newsletter",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "newsletter"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "general"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [416, -60],
+      "id": "node-switch",
+      "name": "Route by Category"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Config').item.json.telegram_chat_id }}",
+        "text": "=🚨 URGENT EMAIL\nFrom: {{ $json.from }}\nSubject: {{ $json.subject }}\n\n{{ $json.summary }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [672, -240],
+      "id": "node-tg-urgent",
+      "name": "Alert: Urgent",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_AFTER_IMPORT",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Config').item.json.invoice_sheet_id }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Invoices"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "received_at": "={{ $json.received_at }}",
+            "from": "={{ $json.from }}",
+            "subject": "={{ $json.subject }}",
+            "summary": "={{ $json.summary }}"
+          }
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [672, -60],
+      "id": "node-sheets",
+      "name": "Log Invoice to Sheets",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_AFTER_IMPORT",
+          "name": "Google Sheets"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [672, 100],
+      "id": "node-noop",
+      "name": "Skip Newsletter"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Config').item.json.telegram_chat_id }}",
+        "text": "=✉️ New email — reply draft for your approval\nFrom: {{ $json.from }}\nSubject: {{ $json.subject }}\nSummary: {{ $json.summary }}\n\n--- Suggested reply ---\n{{ $json.suggested_reply || '(no reply needed)' }}\n\nCopy, edit and send if you approve. The bot never sends email itself.",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [672, 260],
+      "id": "node-tg-draft",
+      "name": "Draft for Approval",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_AFTER_IMPORT",
+          "name": "Telegram Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "New Email (IMAP)": {
+      "main": [[{ "node": "Config", "type": "main", "index": 0 }]]
+    },
+    "Config": {
+      "main": [[{ "node": "Classify (Claude)", "type": "main", "index": 0 }]]
+    },
+    "Classify (Claude)": {
+      "main": [[{ "node": "Parse & Validate", "type": "main", "index": 0 }]]
+    },
+    "Parse & Validate": {
+      "main": [[{ "node": "Route by Category", "type": "main", "index": 0 }]]
+    },
+    "Route by Category": {
+      "main": [
+        [{ "node": "Alert: Urgent", "type": "main", "index": 0 }],
+        [{ "node": "Log Invoice to Sheets", "type": "main", "index": 0 }],
+        [{ "node": "Skip Newsletter", "type": "main", "index": 0 }],
+        [{ "node": "Draft for Approval", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

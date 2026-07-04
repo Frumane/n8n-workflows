@@ -1,0 +1,355 @@
+{
+  "name": "Lead Intake, De-dup & AI Scoring",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 1. Capture & validate\nWebhook receives website form POSTs.\nValidation happens FIRST: bad email or\nhoneypot hit -> 400, nothing downstream\nruns. Garbage never reaches the CRM.",
+        "height": 220,
+        "width": 300
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-608, -280],
+      "id": "note-capture",
+      "name": "Note: Capture"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-intake",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-528, -60],
+      "id": "node-webhook",
+      "name": "Lead Form Webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize + validate. Reject early; never let junk into the CRM.\nconst b = $json.body || {};\nconst email = String(b.email || '').trim().toLowerCase();\nconst name = String(b.name || '').trim();\nconst company = String(b.company || '').trim();\nconst message = String(b.message || '').trim().slice(0, 2000);\nconst honeypot = String(b.website || '').trim(); // hidden field: humans leave it empty\n\nconst emailOk = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$/.test(email);\nconst valid = emailOk && name.length >= 2 && honeypot === '';\n\nreturn [{ json: {\n  valid,\n  reject_reason: valid ? '' : (honeypot ? 'honeypot' : (!emailOk ? 'bad_email' : 'missing_name')),\n  email,\n  name,\n  company,\n  message,\n  domain: emailOk ? email.split('@')[1] : '',\n  received_at: new Date().toISOString(),\n} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-320, -60],
+      "id": "node-validate",
+      "name": "Validate & Normalize"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "strict", "version": 3 },
+          "conditions": [
+            {
+              "id": "c-valid",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [-112, -60],
+      "id": "node-if-valid",
+      "name": "Valid?"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: false, error: $json.reject_reason }) }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [96, 120],
+      "id": "node-reject",
+      "name": "400 Reject"
+    },
+    {
+      "parameters": {
+        "content": "## 2. De-duplicate\nLook the email up in the sheet first.\nExisting lead -> acknowledged but not\nre-inserted, no duplicate alerts.\nIdempotent by design: the same form\nsubmitted twice costs nothing.",
+        "height": 220,
+        "width": 300
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [64, -320],
+      "id": "note-dedupe",
+      "name": "Note: De-dup"
+    },
+    {
+      "parameters": {
+        "operation": "lookup",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Leads"
+        },
+        "lookupColumn": "email",
+        "lookupValue": "={{ $json.email }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [96, -160],
+      "id": "node-lookup",
+      "name": "Lookup Existing Lead",
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_AFTER_IMPORT",
+          "name": "Google Sheets"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "loose", "version": 3 },
+          "conditions": [
+            {
+              "id": "c-new",
+              "leftValue": "={{ $json.email }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "empty", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [304, -160],
+      "id": "node-if-new",
+      "name": "New Lead?"
+    },
+    {
+      "parameters": {
+        "content": "## 3. Score with Claude & store\nThe model returns a strict-JSON score\n(0-100) + reasoning. Parser falls back\nto score 50 / 'manual review' if the\nJSON is malformed. Hot leads (>=70)\nadditionally ping Telegram instantly.",
+        "height": 240,
+        "width": 320
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [480, -360],
+      "id": "note-score",
+      "name": "Note: Score"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: 'claude-sonnet-5',\n  max_tokens: 300,\n  system: 'You score inbound B2B leads 0-100 (fit + intent). Respond ONLY with valid JSON: {\"score\": 0, \"reasoning\": \"one sentence\", \"suggested_next_step\": \"one sentence\"}',\n  messages: [{ role: 'user', content: 'Name: ' + $('Validate & Normalize').item.json.name + '\\nEmail: ' + $('Validate & Normalize').item.json.email + '\\nCompany: ' + $('Validate & Normalize').item.json.company + '\\nDomain: ' + $('Validate & Normalize').item.json.domain + '\\nMessage: ' + $('Validate & Normalize').item.json.message }]\n}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [512, -160],
+      "id": "node-score",
+      "name": "Score Lead (Claude)",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_AFTER_IMPORT",
+          "name": "Anthropic API (x-api-key)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('Validate & Normalize').item.json;\nlet score = 50, reasoning = 'Scorer output unparseable - flagged for manual review.', next_step = 'Review manually';\ntry {\n  const raw = $json.content?.[0]?.text ?? '';\n  const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());\n  score = Math.max(0, Math.min(100, Number(parsed.score) || 0));\n  reasoning = String(parsed.reasoning || '').slice(0, 300);\n  next_step = String(parsed.suggested_next_step || '').slice(0, 300);\n} catch (e) { /* fall back to defaults above */ }\nreturn [{ json: { ...lead, score, reasoning, next_step, is_hot: score >= 70 } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, -160],
+      "id": "node-parse-score",
+      "name": "Parse Score"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Leads"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "received_at": "={{ $json.received_at }}",
+            "email": "={{ $json.email }}",
+            "name": "={{ $json.name }}",
+            "company": "={{ $json.company }}",
+            "message": "={{ $json.message }}",
+            "score": "={{ $json.score }}",
+            "reasoning": "={{ $json.reasoning }}",
+            "next_step": "={{ $json.next_step }}"
+          }
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [928, -160],
+      "id": "node-append",
+      "name": "Append to CRM Sheet",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_AFTER_IMPORT",
+          "name": "Google Sheets"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "strict", "version": 3 },
+          "conditions": [
+            {
+              "id": "c-hot",
+              "leftValue": "={{ $json.is_hot }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1136, -160],
+      "id": "node-if-hot",
+      "name": "Hot Lead?"
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_CHAT_ID",
+        "text": "=🔥 HOT LEAD ({{ $json.score }}/100)\n{{ $json.name }} — {{ $json.company }}\n{{ $json.email }}\n\n{{ $json.reasoning }}\nNext: {{ $json.next_step }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1344, -240],
+      "id": "node-tg-hot",
+      "name": "Notify: Hot Lead",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_AFTER_IMPORT",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [304, 40],
+      "id": "node-ack-dup",
+      "name": "200 OK (Duplicate)"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1344, -80],
+      "id": "node-ack",
+      "name": "200 OK"
+    }
+  ],
+  "connections": {
+    "Lead Form Webhook": {
+      "main": [[{ "node": "Validate & Normalize", "type": "main", "index": 0 }]]
+    },
+    "Validate & Normalize": {
+      "main": [[{ "node": "Valid?", "type": "main", "index": 0 }]]
+    },
+    "Valid?": {
+      "main": [
+        [{ "node": "Lookup Existing Lead", "type": "main", "index": 0 }],
+        [{ "node": "400 Reject", "type": "main", "index": 0 }]
+      ]
+    },
+    "Lookup Existing Lead": {
+      "main": [[{ "node": "New Lead?", "type": "main", "index": 0 }]]
+    },
+    "New Lead?": {
+      "main": [
+        [{ "node": "Score Lead (Claude)", "type": "main", "index": 0 }],
+        [{ "node": "200 OK (Duplicate)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Score Lead (Claude)": {
+      "main": [[{ "node": "Parse Score", "type": "main", "index": 0 }]]
+    },
+    "Parse Score": {
+      "main": [[{ "node": "Append to CRM Sheet", "type": "main", "index": 0 }]]
+    },
+    "Append to CRM Sheet": {
+      "main": [[{ "node": "Hot Lead?", "type": "main", "index": 0 }]]
+    },
+    "Hot Lead?": {
+      "main": [
+        [{ "node": "Notify: Hot Lead", "type": "main", "index": 0 }],
+        [{ "node": "200 OK", "type": "main", "index": 0 }]
+      ]
+    },
+    "Notify: Hot Lead": {
+      "main": [[{ "node": "200 OK", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
