@@ -14,6 +14,8 @@ the `YOUR_*` placeholders in the Config/parameter fields.
 ### 1. AI Email Triage & Assisted Reply
 `workflows/ai-email-triage.json`
 
+![AI Email Triage canvas](docs/ai-email-triage.png)
+
 Watches an inbox over IMAP and classifies every incoming email with Claude
 into `urgent / invoice / newsletter / general`, then routes:
 
@@ -31,6 +33,8 @@ external call.
 ### 2. Lead Intake, De-dup & AI Scoring
 `workflows/lead-intake-scoring.json`
 
+![Lead Intake canvas](docs/lead-intake-scoring.png)
+
 A webhook endpoint for website contact forms:
 
 1. Validates and normalizes the submission (email regex, honeypot
@@ -46,6 +50,8 @@ A webhook endpoint for website contact forms:
 
 ### 3. Global Error Handler
 `workflows/error-alert-handler.json`
+
+![Global Error Handler canvas](docs/error-alert-handler.png)
 
 Set as the **Error Workflow** in every production workflow's settings.
 Any failure, anywhere, becomes an immediate Telegram message with the
